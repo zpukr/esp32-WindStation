@@ -8,9 +8,9 @@
 #include <WebServer.h>
 #include <HTTPClient.h>
 #include <HTTPUpdate.h>
-#include "WiFiManager.h" //https://github.com/tzapu/WiFiManager
+#include "WiFiManager.h" //https://github.com/tzapu/WiFiManager/tree/development
 #include <DNSServer.h> 
-#include <ArduinoJson.h> //https://github.com/bblanchon/ArduinoJson 5.13.3
+#include <ArduinoJson.h> //https://github.com/bblanchon/ArduinoJson
 #include "TimeLib.h"
 #include <MD5Builder.h>
 
@@ -27,7 +27,7 @@ char vaneOffset[4] = "0";                                   // define the offset
 String st;
 String content;
 int statusCode;
-int debouncing_time = 3000;                                  // time in microseconds!
+int debouncing_time = 10000;                                  // time in microseconds!
 unsigned long last_micros = 0;
 volatile int windimpulse = 0;
 
@@ -37,10 +37,10 @@ volatile int windimpulse = 0;
 portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 
 
-#define VERSION     "\n\n-----------------  Wind Station v1.3 ESP32 -----------------"
+#define VERSION     "\n\n-----------------  Wind Station v1.4 ESP32 -----------------"
 #define NameAP      "WindStationAP"
 #define PasswordAP  "87654321"
-#define FirmwareURL "http://server.com/firmware.bin"   //URL of firmware file for http OTA update by secret MQTT command "flash" 
+#define FirmwareURL "http://yourserver/firmware.bin"   //URL of firmware file for http OTA update by secret MQTT command "flash" 
 
 #define USE_Narodmon
 #define USE_Windguru
@@ -91,7 +91,7 @@ int meterWind = 0;
 int calDirection = 0;                                       // calibrated direction of wind vane after offset applied
 
 const float kKnots = 1.94;                                  // m/s to knots conversion   
-const int windPeriodSec = 3;                                // wind measurement period in seconds 1-10sec
+const int windPeriodSec = 10;                                // wind measurement period in seconds 1-10sec
 
 float dhtH, dhtT, windMS = 0;
 float WindMax = 0, WindAvr = 0, WindMin = 0, WindNarodmon = 0;
@@ -142,15 +142,19 @@ void receivedCallback(char* topic, byte* payload, unsigned int length) {
   }
   else if (payload_string == "flash") {
      
+	 noInterrupts();
      WiFiClient client;
      t_httpUpdate_return ret = httpUpdate.update(client, FirmwareURL);
 
     switch (ret) {
       case HTTP_UPDATE_FAILED:
         Serial.printf("HTTP_UPDATE_FAILED Error (%d): %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+        snprintf(message_buff, 60, "HTTP_UPDATE_FAILED Error (%d): %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+        mqttClient.publish(MQTT_TOPIC"/debug", message_buff);
         break;
       case HTTP_UPDATE_NO_UPDATES:
         Serial.println("HTTP_UPDATE_NO_UPDATES");
+        mqttClient.publish(MQTT_TOPIC"/debug", "HTTP_UPDATE_NO_UPDATES");
         break;
       case HTTP_UPDATE_OK:
         Serial.println("HTTP_UPDATE_OK");
@@ -173,8 +177,9 @@ void receivedCallback(char* topic, byte* payload, unsigned int length) {
 
       mqttClient.publish(MQTT_TOPIC"/debug", "saving config");
       Serial.println("saving config");
-      DynamicJsonBuffer jsonBuffer;
-      JsonObject& json = jsonBuffer.createObject();
+      //DynamicJsonBuffer jsonBuffer;
+      //JsonObject& json = jsonBuffer.createObject();
+	  DynamicJsonDocument json(1024);
       json["mqtt_server"] = mqtt_server;
       json["mqtt_port"] = mqtt_port;
       json["mqtt_user"] = mqtt_user;
@@ -190,8 +195,10 @@ void receivedCallback(char* topic, byte* payload, unsigned int length) {
         Serial.println("failed to open config file for writing");
       }
 
-      json.printTo(Serial);
-      json.printTo(configFile);
+      //json.printTo(Serial);
+      //json.printTo(configFile);
+      serializeJson(json, Serial);
+      serializeJson(json, configFile);
       configFile.close();
       
       sendStatus = true;
@@ -244,17 +251,15 @@ void setup() {
       File configFile = SPIFFS.open("/config.json", "r");
       if (configFile) {
         Serial.println("opened config file");
-        size_t size = configFile.size();
-        // Allocate a buffer to store contents of the file.
-        std::unique_ptr<char[]> buf(new char[size]);
 
-        configFile.readBytes(buf.get(), size);
-        DynamicJsonBuffer jsonBuffer;
-        JsonObject& json = jsonBuffer.parseObject(buf.get());
-        json.printTo(Serial);
-        if (json.success()) {
+        DynamicJsonDocument json(1024);
+        DeserializationError error = deserializeJson(json, configFile);
+        if (error) {
+           Serial.print(F("deserializeJson() failed with code "));
+           Serial.println(error.c_str());
+        } else {
+          serializeJson(json, Serial);
           Serial.println("\nparsed json");
-
           strcpy(mqtt_server, json["mqtt_server"]);
           strcpy(mqtt_port, json["mqtt_port"]);
           strcpy(mqtt_user, json["mqtt_user"]);
@@ -264,8 +269,6 @@ void setup() {
           strcpy(windguru_pass, json["windguru_pass"]);
           strcpy(vaneMaxADC, json["vaneMaxADC"]);
           strcpy(vaneOffset, json["vaneOffset"]);
-        } else {
-          Serial.println("failed to load json config");
         }
       }
     }
@@ -352,8 +355,8 @@ void setup() {
   //save the custom parameters to FS
   if (shouldSaveConfig) {
     Serial.println("saving config");
-    DynamicJsonBuffer jsonBuffer;
-    JsonObject& json = jsonBuffer.createObject();
+
+    DynamicJsonDocument json(1024);
     json["mqtt_server"] = mqtt_server;
     json["mqtt_port"] = mqtt_port;
     json["mqtt_user"] = mqtt_user;
@@ -369,8 +372,8 @@ void setup() {
       Serial.println("failed to open config file for writing");
     }
 
-    json.printTo(Serial);
-    json.printTo(configFile);
+    serializeJson(json, Serial);
+    serializeJson(json, configFile);
     configFile.close();
     //end save parameters
   
@@ -409,6 +412,7 @@ void setup() {
       mqttClient.subscribe(MQTT_TOPICo);
       blinkLED(LED, 40, 8);
       digitalWrite(LED, LOW);
+      mqttClient.publish(MQTT_TOPIC"/debug", "Compiled: " __DATE__ " / " __TIME__);
     }
     else {
       Serial.println(" FAILED!");
@@ -547,7 +551,7 @@ void getSensors() {
   if (a0 < 0.997*atoi(vaneMaxADC)) calDirection = 180;
     else
   if (a0 < atoi(vaneMaxADC)) calDirection = 135;
-
+  
   if (a0 < 50) calDirection = calDirection;  
     // skip calculation of direction if value a0 less than 50, use previous calDirection
   else
@@ -570,9 +574,8 @@ void getSensors() {
       
       calDirection = calDirection + atoi(vaneOffset);
     }
-   */
   // --------------- Wind Direction only for Ambient Weather WS-1080/WS-1090 !!!!!!!!!!!!-------------------
-  
+  */
   if(calDirection > 360)
     calDirection = calDirection - 360;
     
@@ -581,7 +584,7 @@ void getSensors() {
     pubString.toCharArray(message_buff, pubString.length()+1);
     if (mqttClient.connected())
       mqttClient.publish(MQTT_TOPIC"/wind", message_buff);
-    Serial.println(" Wind Min: " + String(WindMin, 2) + " Avr: " + String(WindAvr/meterWind, 2) + " Max: " + String(WindMax, 2) + " Dir: " + String(calDirection));
+    Serial.println(" Wind Min: " + String(WindMin, 2) + " Avr: " + String(WindAvr/meterWind, 2) + " Max: " + String(WindMax, 2) + " Dir: " + String(calDirection) + " ");
   
     WindNarodmon = WindAvr/meterWind;
   }
@@ -595,7 +598,7 @@ void timedTasks() {
   int wi = 0;
   if ((millis() > secTTasks + (windPeriodSec*1000)) || (millis() < secTTasks)) { 
     portENTER_CRITICAL(&mux);
-    windMS = (float) windimpulse * windPeriodSec*1000 /(millis() - secTTasks) *atoi(kc_wind)/100;
+    windMS = (float) windimpulse * windPeriodSec*1000 /(millis() - secTTasks) *atoi(kc_wind)/1000;
     wi = windimpulse;
     windimpulse = 0;
     portEXIT_CRITICAL(&mux);
@@ -629,7 +632,7 @@ void timedTasks() {
   //Serial.println(" meterWind: " + String(meterWind) + " windMS: " + String(windMS, 2));
   
 #ifdef DeepSleepMODE
-  if (meterWind == 5) { //after 5 measurements send data and go to sleep
+  if (meterWind == 3) { //after 3 measurements send data and go to sleep
     getSensors();
     #ifdef USE_Narodmon
       SendToNarodmon();
@@ -662,7 +665,7 @@ void timedTasks() {
 #endif
 
 #ifdef NightSleepMODE
-  if (meterWind == 5) { //after 5 measurements send data and go to sleep, but only in night time!
+  if (meterWind == 3) { //after 3 measurements send data and go to sleep, but only in night time!
     time_t time_sync = NTP.getLastNTPSync ();
     if (time_sync!=0) {
       //int hours = (time_sync / 3600) % 24;
@@ -740,6 +743,41 @@ bool SendToNarodmon() { //send info to narodmon.com
   return true; //done
 }
 
+bool SendToNarodmonGet() { // sHTTP GET на http(s)://narodmon.com/get)
+  WiFiClient client;
+  HTTPClient http;    //Declare object of class HTTPClient
+  String getData, Link;
+  unsigned long time;
+  
+  if (WiFi.status() == WL_CONNECTED) { //Check WiFi connection status
+     Link = "http://narodmon.com/get?";
+     time = millis();
+     
+     //http://narodmon.com/get?ID=MAC&mac1=value1&...&macN=valueN
+     getData = "ID=" + WiFi.macAddress() + "&W1=" + String(WindNarodmon, 2) + "&D1=" + String(calDirection);
+     if (!isnan(dhtT)) getData = getData + "&T1=" + String(dhtT);
+     if (!isnan(dhtH)) getData = getData + "&H1=" + String(dhtH);
+     
+     Serial.println(Link + getData);
+     http.begin(Link + getData);            //Specify request destination
+     int httpCode = http.GET();             //Send the request
+     if (httpCode > 0) {                    //Check the returning code
+       String payload = http.getString();   //Get the request response payload
+       Serial.println(payload);             //Print the response payload
+       if (mqttClient.connected() && (payload != "OK")) {
+         payload.toCharArray(message_buff, payload.length()+1);
+         mqttClient.publish(MQTT_TOPIC"/debug", message_buff); 
+       }
+     }
+     http.end();   //Close connection
+   } else  {
+      Serial.println("wi-fi connection failed");
+      return false; // fail;
+   }
+  
+  return true; //done
+}
+
 bool SendToWindguru() { // send info to windguru.cz
   WiFiClient client;
   HTTPClient http;    //Declare object of class HTTPClient
@@ -750,7 +788,6 @@ bool SendToWindguru() { // send info to windguru.cz
      Link = "http://www.windguru.cz/upload/api.php?";
      time = millis();
      
-
      //--------------------------md5------------------------------------------------
      MD5Builder md5;
      md5.begin();
@@ -758,7 +795,6 @@ bool SendToWindguru() { // send info to windguru.cz
      md5.calculate();
      //Serial.println(md5.toString()); // can be getChars() to getBytes() too. (16 chars) .. see above 
      //--------------------------md5------------------------------------------------
-     
      
      //wind speed during interval (knots)
      getData = "uid=" + String(windguru_uid) + "&salt=" + String(time) + "&hash=" + md5.toString() + "&wind_min=" + String(WindMin * kKnots, 2) + "&wind_avg=" + String(WindAvr * kKnots/meterWind, 2) + "&wind_max=" + String(WindMax * kKnots, 2);
@@ -775,8 +811,7 @@ bool SendToWindguru() { // send info to windguru.cz
      if (httpCode > 0) {                    //Check the returning code
        String payload = http.getString();   //Get the request response payload
        Serial.println(payload);             //Print the response payload
-       if (mqttClient.connected() && (payload != "OK"))
-       {
+       if (mqttClient.connected() && (payload != "OK")) {
          payload.toCharArray(message_buff, payload.length()+1);
          mqttClient.publish(MQTT_TOPIC"/debug", message_buff);
        }
